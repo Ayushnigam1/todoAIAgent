@@ -17,10 +17,8 @@ async function getAllTodos() {
 }
 
 async function createTodo(todo) {
-  const [newTodo] = await db.insert(todosTable).values({ todo }).returning({
-    id: todosTable.id,
-  });
-  return newTodo.id;
+  const [newTodo] = await db.insert(todosTable).values({ todo }).returning();
+  return newTodo;
 }
 
 async function deleteTodo(id) {
@@ -51,13 +49,11 @@ const functionDeclarations = [
   },
   {
     name: "createTodo",
-    description: "Create a new todo, returns numeric id",
+    description: "Create a new todo, returns itm with id",
     parametersJsonSchema: {
-      type: "object",
-      properties: {
-        todo: { type: "string", description: "Todo text" },
-      },
-      required: ["todo"],
+     type: "string",
+    description: "Todo text",
+      
     },
   },
   {
@@ -160,9 +156,8 @@ Always respond with valid JSON in one of these formats:
 class TodoAgent {
   constructor() {
     this.client = ai;
-    this.modelName = "gemini-2.5-flash"; // ✅ stable model name
-    this.tools = tools;
-    this.responseJsonSchema = responseJsonSchema;
+    this.modelName = "gemini-2.5-flash";
+    this.tools = [{ functionDeclarations }];
     this.conversationHistory = [];
   }
 
@@ -171,98 +166,121 @@ class TodoAgent {
       console.log(`Executing ${functionName} with input:`, input);
       const fn = localTools[functionName];
       if (!fn) throw new Error(`Function ${functionName} not found`);
-      const result = await fn(input ?? {});
-      return result;
+      return await fn(input ?? {});
     } catch (error) {
       console.error(`Error executing ${functionName}:`, error);
       return { error: error.message };
     }
   }
 
-  async processUserInput(userInput) {
-    try {
-      // start chat
-       this.conversationHistory.push({
-                role: "user",
-                parts: [{ text: userInput }]
-            });
-      const chat = await this.client.chats.create({
-        model: this.modelName,
-        config: {
-          tools: this.tools,
-          systemInstruction: SYSTEM_PROMPT,
-          responseJsonSchema: this.responseJsonSchema,
-        },
-        history: this.conversationHistory,
-      });
+ async processUserInput(userInput) {
+  try {
+    // Add user message to history
+    this.conversationHistory.push({ role: "user", parts: [{ text: userInput }] });
 
     let currentState = "planning";
     let maxIterations = 10;
     let iterations = 0;
+    let lastAIMessage = userInput;
 
-    // while (iterations < maxIterations) {
-    //   iterations++;
-      // send user message
-      const initialResp = await chat.sendMessage({ message: userInput });
-      console.log("AI raw response:", initialResp);
+    while (iterations < maxIterations) {
+      iterations++;
 
-      // find function call
-      const functionCall =
-        initialResp.functionCalls?.[0] ||
-        initialResp.candidates?.[0]?.content?.parts?.find(
-          (p) => p.function_call
-        )?.function_call ||
-        null;
+      // 1️⃣ Generate AI content
+      const response = await this.client.models.generateContent({
+        model: this.modelName,
+        contents: lastAIMessage,
+        config: {
+          tools: this.tools,
+          systemInstruction: SYSTEM_PROMPT,
+        },
+        history: this.conversationHistory,
+      });
 
-      if (functionCall) {
-        const funcName = functionCall.name;
-        let args = functionCall.args ?? {};
-        if (typeof args === "string") {
-          try {
-            args = JSON.parse(args);
-          } catch (_) {}
+      // 2️⃣ Parse AI response JSON
+      const rawText = response.text ?? "";
+     
+
+      const jsonStrings = rawText
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+
+      for (const s of jsonStrings) {
+        let aiResponse;
+        try {
+          aiResponse = JSON.parse(s);
+        } catch {
+          console.log("Failed to parse JSON, treating as output:");
+          aiResponse = { type: "output", output: s };
         }
 
-        // execute tool
-        const toolResult = await this.executeFunction(funcName, args);
+      // 3️⃣ Handle PLAN → ACTION → OBSERVATION → OUTPUT
+      switch (aiResponse.type) {
+        case "plan":
+          console.log("PLAN:", aiResponse.plan);
+          currentState = "action";
+          lastAIMessage = "Proceed to next step";
+          break;
 
-        // send observation back
-        await chat.sendMessage({
-          role: "tool",
-          name: funcName,
-          message: JSON.stringify(toolResult),
-        });
+        case "action":
+          console.log("ACTION:", aiResponse.action);
+          const observation = await this.executeFunction(
+            aiResponse.action.function,
+            aiResponse.action.input
+          );
+ console.log("OBSERVATION RESULT:", observation);
+          // Feed observation back into AI
+          this.conversationHistory.push({
+            role: "tool",
+            name: aiResponse.action.function,
+            parts: [
+              {
+                functionResponse: {
+                  name: aiResponse.action.function,
+                  response: { result: observation },
+                },
+              },
+            ],
+          });
 
-        // ask for final response
-        const finalResp = await chat.sendMessage({
-          message: "Please continue and provide the final response.",
-        });
+          currentState = "observation";
+          lastAIMessage = `Here is the observation for ${aiResponse.action.function}: ${JSON.stringify(
+              observation
+            )}. Continue.`;
+          break;
 
-        const output =
-          finalResp.parsed ??
-          finalResp.text ??
-          finalResp.response?.text?.() ??
-          JSON.stringify(finalResp);
-          console.log("Final output after function call:", output);
-        return { type: "output", output };
-      } else {
-        const parsed =
-          initialResp.parsed ??
-          initialResp.text ??
-          initialResp.response?.text?.() ??
-          JSON.stringify(initialResp);
-        console.log("Parsed response without function call:", parsed);
-        return { type: "output", output: parsed };
+        case "observation":
+          console.log("OBSERVATION:", aiResponse.observation);
+          currentState = "output";
+          lastAIMessage = "Prepare final response";
+          break;
+
+        case "output":
+          // console.log("OUTPUT:", aiResponse.output);
+          this.conversationHistory.push({
+            role: "model",
+            parts: [{ text: aiResponse.output }],
+          });
+          return aiResponse;
+
+        default:
+          console.error("Unknown response type:", aiResponse.type);
+          return { type: "output", output: text };
       }
-    } catch (error) {
-      console.error("Error in processUserInput:", error);
-      return {
-        type: "output",
-        output: "I encountered an error processing your request.",
-      };
     }
   }
+
+    // Fallback if max iterations reached
+    return { type: "output", output: "Reached maximum iterations without producing output." };
+  } catch (error) {
+    console.error("Error in processUserInput:", error);
+    return { type: "output", output: "I encountered an error processing your request." };
+  }
 }
+
+}
+
 
 // ----------------------
 // CLI
@@ -287,7 +305,6 @@ async function main() {
         return;
       }
       const r = await agent.processUserInput(input);
-      console.log("value of r:", r);
       console.log("Agent:", r?.output);
       ask();
     });
