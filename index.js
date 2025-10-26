@@ -2,94 +2,103 @@ import { db } from "./db/index.js";
 import { todosTable } from "./db/schema.js";
 import { eq, ilike } from "drizzle-orm";
 import "dotenv/config";
-import { GoogleGenAI, types } from "@google/genai";
-import readline from "readline"
+import { GoogleGenAI } from "@google/genai";
+import readline from "readline";
+
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Database functions
+// ----------------------
+// Database Functions
+// ----------------------
 
 async function getAllTodos() {
-    const todos = await db.select().from(todosTable);
-    return todos;
+  const todos = await db.select().from(todosTable);
+  return todos;
 }
 
 async function createTodo(todo) {
-    const [newTodo] = await db.insert(todosTable).values({
-        todo,
-    }).returning({
-        id: todosTable.id
-    });
-    return newTodo.id;
+  const [newTodo] = await db.insert(todosTable).values({ todo }).returning({
+    id: todosTable.id,
+  });
+  return newTodo.id;
 }
 
 async function deleteTodo(id) {
-    await db.delete(todosTable).where(eq(todosTable.id, id));
-    return { success: true };
+  await db.delete(todosTable).where(eq(todosTable.id, id));
+  return { success: true };
 }
 
 async function searchTodo(search) {
-    const todos = await db.select().from(todosTable).where(ilike(todosTable.todo, `%${search}%`));
-    return todos;
+  const todos = await db
+    .select()
+    .from(todosTable)
+    .where(ilike(todosTable.todo, `%${search}%`));
+  return todos;
 }
 
-// Build FunctionDeclaration objects using the GenAI SDK types
+// ----------------------
+// ✅ Function Declarations (latest SDK format)
+// ----------------------
+
 const functionDeclarations = [
-  types.FunctionDeclaration({
+  {
     name: "getAllTodos",
     description: "Return all todos from the database",
-    // parameters: {} or explicit OBJECT schema — for getAllTodos no params
     parametersJsonSchema: {
       type: "object",
-      properties: {}
-    }
-  }),
-  types.FunctionDeclaration({
+      properties: {},
+    },
+  },
+  {
     name: "createTodo",
     description: "Create a new todo, returns numeric id",
     parametersJsonSchema: {
       type: "object",
       properties: {
-        todo: { type: "string", description: "Todo text" }
+        todo: { type: "string", description: "Todo text" },
       },
-      required: ["todo"]
-    }
-  }),
-  types.FunctionDeclaration({
+      required: ["todo"],
+    },
+  },
+  {
     name: "deleteTodo",
     description: "Delete a todo by id",
     parametersJsonSchema: {
       type: "object",
       properties: {
-        id: { type: "integer", description: "Todo id" }
+        id: { type: "integer", description: "Todo id" },
       },
-      required: ["id"]
-    }
-  }),
-  types.FunctionDeclaration({
+      required: ["id"],
+    },
+  },
+  {
     name: "searchTodo",
     description: "Search todos using pattern matching",
     parametersJsonSchema: {
       type: "object",
       properties: {
-        search: { type: "string", description: "Search pattern string" }
+        search: { type: "string", description: "Search pattern string" },
       },
-      required: ["search"]
-    }
-  }),
- 
+      required: ["search"],
+    },
+  },
 ];
 
-// Group them into a Tool (each Tool can contain multiple functionDeclarations)
-const toolsForModel = [ types.Tool({ functionDeclarations }) ];
+// Group into tools (latest SDK shape)
+const tools = [{ functionDeclarations }];
 
-// Tools mapping
+// Local tool mapping
 const localTools = {
-    getAllTodos: getAllTodos,
-    createTodo: createTodo,
-    deleteTodo: deleteTodo,
-    searchTodo: searchTodo
+  getAllTodos,
+  createTodo,
+  deleteTodo,
+  searchTodo,
 };
-// Response schema for structured output
+
+// ----------------------
+// Response JSON Schema
+// ----------------------
+
 const responseJsonSchema = {
   type: "object",
   properties: {
@@ -98,18 +107,23 @@ const responseJsonSchema = {
     action: {
       type: "object",
       properties: {
-        function: { type: "string", enum: ["getAllTodos", "createTodo", "deleteTodo", "searchTodo"] },
-        input: { type: ["object", "null"] }
+        function: {
+          type: "string",
+          enum: ["getAllTodos", "createTodo", "deleteTodo", "searchTodo"],
+        },
+        input: { type: ["object", "null"] },
       },
-      required: ["function", "input"]
+      required: ["function", "input"],
     },
     observation: {},
-    output: { type: "string" }
+    output: { type: "string" },
   },
-  required: ["type"]
+  required: ["type"],
 };
 
-
+// ----------------------
+// SYSTEM PROMPT
+// ----------------------
 
 const SYSTEM_PROMPT = `
 You are an AI TO-DO list Assistant with START, PLAN, ACTION, OBSERVATION AND OUTPUT states.
@@ -137,205 +151,152 @@ Always respond with valid JSON in one of these formats:
 {"type": "action", "action": {"function": "functionName", "input": {...}}}
 {"type": "observation", "observation": "result from action"}
 {"type": "output", "output": "your response to user"}
-
-Example:
-START
-{"type" : "user", "user": "Add a task for shopping groceries." }
-{"type" : "plan" , "plan" : "I will try to get more context on what user need to shop."}
-{"type" : "output" , "output" : "Can you tell me what all item you want to shop for?"}
-{"type" : "user", "user": "I want to shop for milk, kurkure, lays and chocos" }
-{"type" : "plan" , "plan" : "I will use createTodo to create a new Todo in DB."}
-{"type" : "action" ,"function":"createTodo", "input" : "Shopping for milk, kurkure, lays and chocos"}
-{"type" : "observation" , "observation" : 2}
-{"type" : "output" , "output" : "your todo has been added successfully"}
 `;
 
+// ----------------------
+// TodoAgent Class
+// ----------------------
+
 class TodoAgent {
-    constructor() {
-        this.client =ai;
-        this.modelName = "gemini-2.5-flash";
-        this.tools = tools;
-        this.responseJsonSchema = responseJsonSchema;
-        this.conversationHistory = [];
+  constructor() {
+    this.client = ai;
+    this.modelName = "gemini-2.5-flash"; // ✅ stable model name
+    this.tools = tools;
+    this.responseJsonSchema = responseJsonSchema;
+    this.conversationHistory = [];
+  }
+
+  async executeFunction(functionName, input) {
+    try {
+      console.log(`Executing ${functionName} with input:`, input);
+      const fn = localTools[functionName];
+      if (!fn) throw new Error(`Function ${functionName} not found`);
+      const result = await fn(input ?? {});
+      return result;
+    } catch (error) {
+      console.error(`Error executing ${functionName}:`, error);
+      return { error: error.message };
     }
-    
+  }
 
-    async executeFunction(functionName, input) {
-        try {
-            console.log(`Executing ${functionName} with input:`, input);
-            const fn = localTools[functionName];
-            if (!fn) {
-                throw new Error(`Function ${functionName} not found`);
-            }
-            const result = await fn(input ?? {});
-
-            return result;
-        } catch (error) {
-            console.error(`Error executing ${functionName}:`, error);
-            return { error: error.message };
-        }
-    }
-
-    async processUserInput(userInput) {
-        try {
-          // start a stateful chat
+  async processUserInput(userInput) {
+    try {
+      // start chat
+       this.conversationHistory.push({
+                role: "user",
+                parts: [{ text: userInput }]
+            });
       const chat = await this.client.chats.create({
         model: this.modelName,
         config: {
           tools: this.tools,
-          responseMimeType: "application/json",
+          systemInstruction: SYSTEM_PROMPT,
           responseJsonSchema: this.responseJsonSchema,
-          // functionCalling: { mode: "AUTO" } // optional
-        }
+        },
+        history: this.conversationHistory,
       });
-           // send the user message
-      const initialResp = await chat.sendMessage({ content: userInput });
-      // helper: find function_call in response (SDK shapes vary; check resp fields)
-      const functionCall = initialResp.functionCalls?.[0]
-                        || (initialResp.candidates?.[0]?.content?.parts?.find(p => p.function_call)?.function_call)
-                        || null;
-    
+
+    let currentState = "planning";
+    let maxIterations = 10;
+    let iterations = 0;
+
+    // while (iterations < maxIterations) {
+    //   iterations++;
+      // send user message
+      const initialResp = await chat.sendMessage({ message: userInput });
+      console.log("AI raw response:", initialResp);
+
+      // find function call
+      const functionCall =
+        initialResp.functionCalls?.[0] ||
+        initialResp.candidates?.[0]?.content?.parts?.find(
+          (p) => p.function_call
+        )?.function_call ||
+        null;
+
       if (functionCall) {
-        // model asked to call a function
         const funcName = functionCall.name;
-        // args may be a string or already parsed object depending on SDK; try parsing
         let args = functionCall.args ?? {};
         if (typeof args === "string") {
-          try { args = JSON.parse(args); } catch (_) { /* keep string */ }
+          try {
+            args = JSON.parse(args);
+          } catch (_) {}
         }
-         // execute tool
+
+        // execute tool
         const toolResult = await this.executeFunction(funcName, args);
 
-         // send tool's observation back to the chat as a tool message
+        // send observation back
         await chat.sendMessage({
           role: "tool",
           name: funcName,
-          content: JSON.stringify(toolResult)
+          message: JSON.stringify(toolResult),
         });
-         // ask model to continue and finalize response
-        const finalResp = await chat.sendMessage({ content: "Please continue and provide the final response." });
 
-        // If SDK parsed according to responseJsonSchema, finalResp.parsed may exist
-        const output = finalResp.parsed ?? (finalResp.text ?? finalResp.response?.text?.());
+        // ask for final response
+        const finalResp = await chat.sendMessage({
+          message: "Please continue and provide the final response.",
+        });
+
+        const output =
+          finalResp.parsed ??
+          finalResp.text ??
+          finalResp.response?.text?.() ??
+          JSON.stringify(finalResp);
+          console.log("Final output after function call:", output);
         return { type: "output", output };
-    }
-    else {
-        // No function call — model returned direct JSON output or text
-        const parsed = initialResp.parsed ?? initialResp.text ?? initialResp.response?.text?.();
+      } else {
+        const parsed =
+          initialResp.parsed ??
+          initialResp.text ??
+          initialResp.response?.text?.() ??
+          JSON.stringify(initialResp);
+        console.log("Parsed response without function call:", parsed);
         return { type: "output", output: parsed };
+      }
+    } catch (error) {
+      console.error("Error in processUserInput:", error);
+      return {
+        type: "output",
+        output: "I encountered an error processing your request.",
+      };
     }
-            // let currentState = "planning";
-            // let maxIterations = 10;
-            // let iterations = 0;
-
-            // while (iterations < maxIterations) {
-            //     iterations++;
-                
-            //     const result = await chat.sendMessage(
-            //         currentState === "planning" 
-            //             ? `Plan how to respond to: "${userInput}"` 
-            //             : "Continue with the next step"
-            //     );
-
-            //     const responseText = result.response.text();
-            //     console.log("AI Response:", responseText);
-
-            //     let aiResponse;
-            //     try {
-            //         aiResponse = JSON.parse(responseText);
-            //     } catch (e) {
-            //         console.error("Failed to parse AI response as JSON:", responseText);
-            //         return { type: "output", output: "I apologize, but I encountered an error processing your request." };
-            //     }
-
-            //     // Handle different response types
-            //     switch (aiResponse.type) {
-            //         case "plan":
-            //             console.log("Planning:", aiResponse.plan);
-            //             currentState = "action";
-            //             break;
-
-            //         case "action":
-            //             console.log("Taking action:", aiResponse.action);
-            //             const observation = await this.executeFunction(
-            //                 aiResponse.action.function, 
-            //                 aiResponse.action.input
-            //             );
-                        
-            //             // Send observation back to the model
-            //             await chat.sendMessage(`Observation: ${JSON.stringify(observation)}`);
-            //             currentState = "output";
-            //             break;
-
-            //         case "observation":
-            //             console.log("Observation noted:", aiResponse.observation);
-            //             currentState = "output";
-            //             break;
-
-            //         case "output":
-            //             console.log("Final output:", aiResponse.output);
-            //             // Add assistant response to conversation history
-            //             this.conversationHistory.push({
-            //                 role: "model",
-            //                 parts: [{ text: aiResponse.output }]
-            //             });
-            //             return aiResponse;
-
-            //         default:
-            //             console.error("Unknown response type:", aiResponse.type);
-            //             return { type: "output", output: "I encountered an unexpected error." };
-            //     }
-            // }
-
-            // return { type: "output", output: "I couldn't complete the task within the allowed steps." };
-
-        } catch (error) {
-            console.error("Error in processUserInput:", error);
-            return { type: "output", output: "I apologize, but I encountered an error processing your request." };
-        }
-    }
+  }
 }
 
-// Usage example and CLI interface
+// ----------------------
+// CLI
+// ----------------------
+
 async function main() {
-    const agent = new TodoAgent();
-    
-    console.log("Todo Agent started! Type 'exit' to quit.");
-    
-    // Simple CLI interface for testing
-    if (process.argv.length > 2) {
-        const userInput = process.argv.slice(2).join(' ');
-        const response = await agent.processUserInput(userInput);
-        console.log("\nAgent Response:", response.output);
+  const agent = new TodoAgent();
+
+  if (process.argv.length > 2) {
+    const userInput = process.argv.slice(2).join(" ");
+    const res = await agent.processUserInput(userInput);
+    console.log("\nAgent Response:", res.output);
+    return;
+  }
+
+  console.log("Todo Agent started! Type 'exit' to quit.");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = () => {
+    rl.question("\nYou: ", async (input) => {
+      if (input.toLowerCase() === "exit") {
+        rl.close();
         return;
-    }
-
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
+      }
+      const r = await agent.processUserInput(input);
+      console.log("value of r:", r);
+      console.log("Agent:", r?.output);
+      ask();
     });
-
-    const askQuestion = () => {
-        rl.question('\nYou: ', async (input) => {
-            if (input.toLowerCase() === 'exit') {
-                console.log("Goodbye!");
-                rl.close();
-                return;
-            }
-
-            const response = await agent.processUserInput(input);
-            console.log("Agent:", response.output);
-            askQuestion();
-        });
-    };
-
-    askQuestion();
+  };
+  ask();
 }
 
-// Export for use in other modules
 export { TodoAgent, main };
 
-// Run if this file is executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-    main().catch(console.error);
+  main().catch(console.error);
 }
