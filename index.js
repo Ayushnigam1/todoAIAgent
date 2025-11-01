@@ -1,6 +1,6 @@
 import { db } from "./db/index.js";
 import { todosTable } from "./db/schema.js";
-import { eq, ilike } from "drizzle-orm";
+import { eq, ilike, inArray } from "drizzle-orm";
 import "dotenv/config";
 import { GoogleGenAI } from "@google/genai";
 import readline from "readline";
@@ -25,7 +25,20 @@ async function deleteTodo({ id }) {
   return { success: true, message: `Todo ${id} deleted successfully` };
 }
 
-async function searchTodo({search}) {
+async function deleteManyTodos({ ids }) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error("Please provide a non-empty array of todo IDs to delete.");
+  }
+  await db.delete(todosTable).where(inArray(todosTable.id, ids));
+  return { success: true, message: `Deleted todos with ids: [${ids.join(", ")}]` };
+}
+
+async function deleteAllTodos() {
+  await db.delete(todosTable);
+  return { success: true, message: "All todos deleted successfully." };
+}
+
+async function searchTodo({ search }) {
   const todos = await db
     .select()
     .from(todosTable)
@@ -66,6 +79,30 @@ const functionDeclarations = [
     },
   },
   {
+  name: "deleteManyTodos",
+  description: "Delete multiple todos by their IDs",
+  parametersJsonSchema: {
+    type: "object",
+    properties: {
+      ids: {
+        type: "array",
+        items: { type: "integer" },
+        description: "Array of todo IDs to delete",
+      },
+    },
+    required: ["ids"],
+  },
+},
+{
+  name: "deleteAllTodos",
+  description: "Delete all todos from the database",
+  parametersJsonSchema:{
+    type:"object",
+    properties:{  
+  },
+}
+},
+  {
     name: "searchTodo",
     description: "Search todos using pattern matching",
     parametersJsonSchema: {
@@ -78,8 +115,6 @@ const functionDeclarations = [
   },
 ];
 
-// Group into tools (latest SDK shape)
-const tools = [{ functionDeclarations }];
 
 // Local tool mapping
 const localTools = {
@@ -87,6 +122,8 @@ const localTools = {
   createTodo,
   deleteTodo,
   searchTodo,
+  deleteManyTodos,
+  deleteAllTodos,
 };
 
 // ----------------------
@@ -103,7 +140,14 @@ const responseJsonSchema = {
       properties: {
         function: {
           type: "string",
-          enum: ["getAllTodos", "createTodo", "deleteTodo", "searchTodo"],
+        enum: [
+  "getAllTodos",
+  "createTodo",
+  "deleteTodo",
+  "deleteManyTodos",
+  "deleteAllTodos",
+  "searchTodo",
+],
         },
         input: { type: ["object", "null"] },
       },
@@ -139,6 +183,8 @@ Available tools:
 - createTodo(todo:string): create a new todo in the Database and takes todo as string and return an id of created todo
 - deleteTodo(id:integer): Delete that particular todo by id from Database and takes id as a integer
 - searchTodo(search:string): Return all the Matching todos from Database using pattern matching
+- deleteManyTodos(ids: integer[]): Delete multiple todos by their IDs
+- deleteAllTodos(): Delete all todos from the Database
 
 Always respond with valid JSON in one of these formats:
 {"type": "plan", "plan": "your planning thoughts"}
@@ -162,7 +208,8 @@ class TodoAgent {
   async executeFunction(functionName, input) {
     try {
       console.log(`Executing ${functionName} with input:`, input);
-      const fn = localTools[functionName];
+       const normalizedName = functionName.split(".").pop();
+      const fn = localTools[normalizedName];
       if (!fn) throw new Error(`Function ${functionName} not found`);
       return await fn(input ?? {});
     } catch (error) {
@@ -171,56 +218,175 @@ class TodoAgent {
     }
   }
 
+  //   async processUserInput(userInput) {
+  //     try {
+  //       // Add user message to history
+  //       // this.conversationHistory.push({
+  //       //   role: "user",
+  //       //   parts: [{ text: userInput }],
+  //       // });
+
+  //       let currentState = "planning";
+  //       let maxIterations = 10;
+  //       let iterations = 0;
+  //       let lastAIMessage = userInput;
+
+  //       while (iterations < maxIterations) {
+  //         iterations++;
+
+  //         // 1️⃣ Generate AI content
+  //         const response = await this.client.models.generateContent({
+  //           model: this.modelName,
+  //           contents: [
+  //     ...this.conversationHistory,
+  //     { role: "user", parts: [{ text: lastAIMessage }] },
+  //   ],
+  //          config: {
+  //     tools: this.tools,
+  //     systemInstruction: SYSTEM_PROMPT,
+  //   },
+  //           history: this.conversationHistory,
+  //         });
+
+  //         // 2️⃣ Parse AI response JSON
+  //         const rawText = response.text ?? "";
+
+  //         const jsonStrings = rawText
+  //           .split("\n")
+  //           .map((s) => s.trim())
+  //           .filter((s) => s.length > 0);
+
+  //         for (const s of jsonStrings) {
+  //           let aiResponse;
+  //           try {
+  //             aiResponse = JSON.parse(s);
+  //           } catch {
+  //             console.log("Failed to parse JSON, treating as output:");
+  //             aiResponse = { type: "output", output: s };
+  //           }
+
+  //           // 3️⃣ Handle PLAN → ACTION → OBSERVATION → OUTPUT
+  //           switch (aiResponse.type) {
+  //             case "plan":
+  //               console.log("PLAN:", aiResponse.plan);
+  //               currentState = "action";
+  //               lastAIMessage = "Proceed to next step";
+  //               break;
+
+  //             case "action":
+  //               console.log("ACTION:", aiResponse.action);
+  //               const observation = await this.executeFunction(
+  //                 aiResponse.action.function,
+  //                 aiResponse.action.input
+  //               );
+  //               console.log("OBSERVATION RESULT:", observation);
+  //               // Feed observation back into AI
+  //               this.conversationHistory.push({
+  //                 role: "tool",
+  //                 name: aiResponse.action.function,
+  //                 parts: [
+  //                   {
+  //                     functionResponse: {
+  //                       name: aiResponse.action.function,
+  //                       response: { result: observation },
+  //                     },
+  //                   },
+  //                 ],
+  //               });
+
+  //               currentState = "observation";
+  //            lastAIMessage = `
+  // Here is the observation for ${aiResponse.action.function}:
+  // ${JSON.stringify(observation, null, 2)}.
+  // Based on this result, decide the next logical action or provide final output if done.
+  // `;
+  //               break;
+
+  //             case "observation":
+  //               console.log("OBSERVATION:", aiResponse.observation);
+  //               currentState = "output";
+  //               lastAIMessage = "Prepare final response";
+  //               break;
+
+  //             case "output":
+  //               // console.log("OUTPUT:", aiResponse.output);
+  //               this.conversationHistory.push({
+  //                 role: "model",
+  //                 parts: [{ text: aiResponse.output }],
+  //               });
+  //               return aiResponse;
+
+  //             default:
+  //               console.error("Unknown response type:", aiResponse.type);
+  //               return { type: "output", output: text };
+  //           }
+  //         }
+  //       }
+
+  //       // Fallback if max iterations reached
+  //       return {
+  //         type: "output",
+  //         output: "Reached maximum iterations without producing output.",
+  //       };
+  //     } catch (error) {
+  //       console.error("Error in processUserInput:", error);
+  //       return {
+  //         type: "output",
+  //         output: "I encountered an error processing your request.",
+  //       };
+  //     }
+  //   }
   async processUserInput(userInput) {
     try {
-      // Add user message to history
+      // Add user message to conversation
       this.conversationHistory.push({
         role: "user",
         parts: [{ text: userInput }],
       });
 
-      let currentState = "planning";
-      let maxIterations = 10;
-      let iterations = 0;
+      let maxIterations = 50;
       let lastAIMessage = userInput;
 
-      while (iterations < maxIterations) {
-        iterations++;
-
-        // 1️⃣ Generate AI content
+      for (let i = 0; i < maxIterations; i++) {
         const response = await this.client.models.generateContent({
           model: this.modelName,
-          contents: lastAIMessage,
-          config: {
-            tools: this.tools,
-            systemInstruction: SYSTEM_PROMPT,
-          },
-          history: this.conversationHistory,
+          contents: [
+            ...this.conversationHistory,
+            { role: "user", parts: [{ text: lastAIMessage }] },
+          ],
+          config: { tools: this.tools, systemInstruction: SYSTEM_PROMPT },
         });
 
-        // 2️⃣ Parse AI response JSON
-        const rawText = response.text ?? "";
+        const rawText =
+          response.text ??
+          response.candidates?.[0]?.content?.parts?.[0]?.text ??
+          "";
 
         const jsonStrings = rawText
           .split("\n")
           .map((s) => s.trim())
-          .filter((s) => s.length > 0);
+          .filter(Boolean);
+
+        if (!jsonStrings.length) break;
 
         for (const s of jsonStrings) {
           let aiResponse;
+          let clean = s
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .replace(/^Agent:\s*/i, "")
+    .trim();
           try {
-            aiResponse = JSON.parse(s);
+            aiResponse = JSON.parse(clean);
           } catch {
-            console.log("Failed to parse JSON, treating as output:");
-            aiResponse = { type: "output", output: s };
+            console.log("Failed to parse JSON:", clean.slice(0, 200));
+            aiResponse = { type: "output", output: clean };
           }
 
-          // 3️⃣ Handle PLAN → ACTION → OBSERVATION → OUTPUT
           switch (aiResponse.type) {
             case "plan":
               console.log("PLAN:", aiResponse.plan);
-              currentState = "action";
-              lastAIMessage = "Proceed to next step";
+              lastAIMessage = "Proceed to next step.";
               break;
 
             case "action":
@@ -230,7 +396,7 @@ class TodoAgent {
                 aiResponse.action.input
               );
               console.log("OBSERVATION RESULT:", observation);
-              // Feed observation back into AI
+
               this.conversationHistory.push({
                 role: "tool",
                 name: aiResponse.action.function,
@@ -244,20 +410,14 @@ class TodoAgent {
                 ],
               });
 
-              currentState = "observation";
-              lastAIMessage = `Here is the observation for ${
-                aiResponse.action.function
-              }: ${JSON.stringify(observation)}. Proceed to next step.`;
-              break;
-
-            case "observation":
-              console.log("OBSERVATION:", aiResponse.observation);
-              currentState = "output";
-              lastAIMessage = "Prepare final response";
+              lastAIMessage = `
+Here is the observation for ${aiResponse.action.function}:
+${JSON.stringify(observation, null, 2)}.
+Based on this, decide the next step or provide final output.
+`;
               break;
 
             case "output":
-              // console.log("OUTPUT:", aiResponse.output);
               this.conversationHistory.push({
                 role: "model",
                 parts: [{ text: aiResponse.output }],
@@ -265,22 +425,21 @@ class TodoAgent {
               return aiResponse;
 
             default:
-              console.error("Unknown response type:", aiResponse.type);
-              return { type: "output", output: text };
+              console.warn("Unknown type:", aiResponse.type);
+              return { type: "output", output: rawText };
           }
         }
       }
 
-      // Fallback if max iterations reached
       return {
         type: "output",
-        output: "Reached maximum iterations without producing output.",
+        output: "Reached maximum iterations without final output.",
       };
     } catch (error) {
       console.error("Error in processUserInput:", error);
       return {
         type: "output",
-        output: "I encountered an error processing your request.",
+        output: "An error occurred while processing your request.",
       };
     }
   }
