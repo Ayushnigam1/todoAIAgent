@@ -20,13 +20,12 @@ async function createTodo(todo) {
   const [newTodo] = await db.insert(todosTable).values({ todo }).returning();
   return newTodo;
 }
-
-async function deleteTodo(id) {
+async function deleteTodo({ id }) {
   await db.delete(todosTable).where(eq(todosTable.id, id));
-  return { success: true };
+  return { success: true, message: `Todo ${id} deleted successfully` };
 }
 
-async function searchTodo(search) {
+async function searchTodo({search}) {
   const todos = await db
     .select()
     .from(todosTable)
@@ -51,9 +50,8 @@ const functionDeclarations = [
     name: "createTodo",
     description: "Create a new todo, returns itm with id",
     parametersJsonSchema: {
-     type: "string",
-    description: "Todo text",
-      
+      type: "string",
+      description: "Todo text",
     },
   },
   {
@@ -173,114 +171,120 @@ class TodoAgent {
     }
   }
 
- async processUserInput(userInput) {
-  try {
-    // Add user message to history
-    this.conversationHistory.push({ role: "user", parts: [{ text: userInput }] });
-
-    let currentState = "planning";
-    let maxIterations = 10;
-    let iterations = 0;
-    let lastAIMessage = userInput;
-
-    while (iterations < maxIterations) {
-      iterations++;
-
-      // 1️⃣ Generate AI content
-      const response = await this.client.models.generateContent({
-        model: this.modelName,
-        contents: lastAIMessage,
-        config: {
-          tools: this.tools,
-          systemInstruction: SYSTEM_PROMPT,
-        },
-        history: this.conversationHistory,
+  async processUserInput(userInput) {
+    try {
+      // Add user message to history
+      this.conversationHistory.push({
+        role: "user",
+        parts: [{ text: userInput }],
       });
 
-      // 2️⃣ Parse AI response JSON
-      const rawText = response.text ?? "";
-     
+      let currentState = "planning";
+      let maxIterations = 10;
+      let iterations = 0;
+      let lastAIMessage = userInput;
 
-      const jsonStrings = rawText
-        .split("\n")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
+      while (iterations < maxIterations) {
+        iterations++;
 
-      for (const s of jsonStrings) {
-        let aiResponse;
-        try {
-          aiResponse = JSON.parse(s);
-        } catch {
-          console.log("Failed to parse JSON, treating as output:");
-          aiResponse = { type: "output", output: s };
+        // 1️⃣ Generate AI content
+        const response = await this.client.models.generateContent({
+          model: this.modelName,
+          contents: lastAIMessage,
+          config: {
+            tools: this.tools,
+            systemInstruction: SYSTEM_PROMPT,
+          },
+          history: this.conversationHistory,
+        });
+
+        // 2️⃣ Parse AI response JSON
+        const rawText = response.text ?? "";
+
+        const jsonStrings = rawText
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+
+        for (const s of jsonStrings) {
+          let aiResponse;
+          try {
+            aiResponse = JSON.parse(s);
+          } catch {
+            console.log("Failed to parse JSON, treating as output:");
+            aiResponse = { type: "output", output: s };
+          }
+
+          // 3️⃣ Handle PLAN → ACTION → OBSERVATION → OUTPUT
+          switch (aiResponse.type) {
+            case "plan":
+              console.log("PLAN:", aiResponse.plan);
+              currentState = "action";
+              lastAIMessage = "Proceed to next step";
+              break;
+
+            case "action":
+              console.log("ACTION:", aiResponse.action);
+              const observation = await this.executeFunction(
+                aiResponse.action.function,
+                aiResponse.action.input
+              );
+              console.log("OBSERVATION RESULT:", observation);
+              // Feed observation back into AI
+              this.conversationHistory.push({
+                role: "tool",
+                name: aiResponse.action.function,
+                parts: [
+                  {
+                    functionResponse: {
+                      name: aiResponse.action.function,
+                      response: { result: observation },
+                    },
+                  },
+                ],
+              });
+
+              currentState = "observation";
+              lastAIMessage = `Here is the observation for ${
+                aiResponse.action.function
+              }: ${JSON.stringify(observation)}. Proceed to next step.`;
+              break;
+
+            case "observation":
+              console.log("OBSERVATION:", aiResponse.observation);
+              currentState = "output";
+              lastAIMessage = "Prepare final response";
+              break;
+
+            case "output":
+              // console.log("OUTPUT:", aiResponse.output);
+              this.conversationHistory.push({
+                role: "model",
+                parts: [{ text: aiResponse.output }],
+              });
+              return aiResponse;
+
+            default:
+              console.error("Unknown response type:", aiResponse.type);
+              return { type: "output", output: text };
+          }
         }
-
-      // 3️⃣ Handle PLAN → ACTION → OBSERVATION → OUTPUT
-      switch (aiResponse.type) {
-        case "plan":
-          console.log("PLAN:", aiResponse.plan);
-          currentState = "action";
-          lastAIMessage = "Proceed to next step";
-          break;
-
-        case "action":
-          console.log("ACTION:", aiResponse.action);
-          const observation = await this.executeFunction(
-            aiResponse.action.function,
-            aiResponse.action.input
-          );
- console.log("OBSERVATION RESULT:", observation);
-          // Feed observation back into AI
-          this.conversationHistory.push({
-            role: "tool",
-            name: aiResponse.action.function,
-            parts: [
-              {
-                functionResponse: {
-                  name: aiResponse.action.function,
-                  response: { result: observation },
-                },
-              },
-            ],
-          });
-
-          currentState = "observation";
-          lastAIMessage = `Here is the observation for ${aiResponse.action.function}: ${JSON.stringify(
-              observation
-            )}. Continue.`;
-          break;
-
-        case "observation":
-          console.log("OBSERVATION:", aiResponse.observation);
-          currentState = "output";
-          lastAIMessage = "Prepare final response";
-          break;
-
-        case "output":
-          // console.log("OUTPUT:", aiResponse.output);
-          this.conversationHistory.push({
-            role: "model",
-            parts: [{ text: aiResponse.output }],
-          });
-          return aiResponse;
-
-        default:
-          console.error("Unknown response type:", aiResponse.type);
-          return { type: "output", output: text };
       }
+
+      // Fallback if max iterations reached
+      return {
+        type: "output",
+        output: "Reached maximum iterations without producing output.",
+      };
+    } catch (error) {
+      console.error("Error in processUserInput:", error);
+      return {
+        type: "output",
+        output: "I encountered an error processing your request.",
+      };
     }
   }
-
-    // Fallback if max iterations reached
-    return { type: "output", output: "Reached maximum iterations without producing output." };
-  } catch (error) {
-    console.error("Error in processUserInput:", error);
-    return { type: "output", output: "I encountered an error processing your request." };
-  }
 }
-
-}
-
 
 // ----------------------
 // CLI
@@ -297,7 +301,10 @@ async function main() {
   }
 
   console.log("Todo Agent started! Type 'exit' to quit.");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   const ask = () => {
     rl.question("\nYou: ", async (input) => {
       if (input.toLowerCase() === "exit") {
